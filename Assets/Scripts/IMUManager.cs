@@ -12,9 +12,14 @@ public class IMUManager : MonoBehaviour
     [Range(0.5f, 2f)]
     public float sensitivity = 1.0f;
 
+    [Tooltip("Use Madgwick sensor fusion. If false, uses raw gyro integration only.")]
     public bool useSensorFusion = true;
+
     [Range(0f, 1f)]
-    public float complementaryAlpha = 0.5f;
+    [Tooltip("Blend between raw gyro integration (0) and fusion (1).")]
+    public float complementaryAlpha = 1.0f;
+
+    [Tooltip("Madgwick beta parameter.")]
     public float madgwickBeta = 0.1f;
 
     [Header("Axis Inversion for Testing (Accel)")]
@@ -27,10 +32,19 @@ public class IMUManager : MonoBehaviour
     public bool invertGyroY = false;
     public bool invertGyroZ = false;
 
-    private Quaternion currentRotation = Quaternion.identity;
+    // Internal state
+    private Quaternion initialPaddleRotation;          // The localRotation of paddle at first IMU data
+    private bool firstImuReceived = false;
+
+    // For raw gyro integration:
+    private Quaternion sensorOrientationRaw = Quaternion.identity;
+
+    // For fusion:
+    private MadgwickAHRS madgwick;
+    private Quaternion initialSensorOrientationFusion = Quaternion.identity; // captured at first reading
+
     private float lastUpdateTime;
     private bool hasImuData = false;
-    private MadgwickAHRS madgwick;
 
     void Start()
     {
@@ -47,30 +61,52 @@ public class IMUManager : MonoBehaviour
             return;
         }
 
-        currentRotation = Quaternion.identity;
-        paddleTransform.localRotation = Quaternion.identity;
+        // Initialize but delay capturing initialPaddleRotation until first IMU reading
         hasImuData = false;
+        firstImuReceived = false;
         lastUpdateTime = Time.time;
 
+        // Initialize Madgwick (class assumed unchanged in your project)
         madgwick = new MadgwickAHRS(1f / 50f, madgwickBeta);
+
+        // Subscribe
         bleManager.OnImuDataReceived += HandleImuData;
     }
 
     void Update()
     {
+        // Only apply when we have IMU data
         if (hasImuData)
-            paddleTransform.localRotation = currentRotation;
+        {
+            // currentPaddleRotation is updated in HandleImuData, so here we simply assign it
+            paddleTransform.localRotation = currentPaddleRotation;
+        }
     }
+
+    // This holds the computed final paddle rotation each frame
+    private Quaternion currentPaddleRotation = Quaternion.identity;
 
     private void HandleImuData(string playerId, Vector3 accRaw, Vector3 gyroRaw)
     {
-        // No filtering by playerId since only one device is expected.
+        // 1. On first IMU data: capture initial paddle orientation and reset sensorOrientation state
+        if (!firstImuReceived)
+        {
+            initialPaddleRotation = paddleTransform.localRotation;
+            // Reset raw integration state
+            sensorOrientationRaw = Quaternion.identity;
+            // Reset Madgwick state
+            madgwick.Reset();
+            initialSensorOrientationFusion = Quaternion.identity; // will capture below after first fusion update
+            firstImuReceived = true;
+            // Reset timing
+            lastUpdateTime = Time.time;
+        }
 
-        // 1. Remap raw sensor axes → Unity axes
+        // 2. Remap raw sensor axes → Unity axes
         Vector3 accelRemapped = new Vector3(accRaw.x, accRaw.z, accRaw.y);
         Vector3 gyroRemapped = new Vector3(gyroRaw.x, gyroRaw.z, gyroRaw.y);
 
-        // 2. Apply inversion toggles
+        // 3. Apply per-axis inversion toggles
         Vector3 accelUnity = new Vector3(
             invertAccelX ? -accelRemapped.x : accelRemapped.x,
             invertAccelY ? -accelRemapped.y : accelRemapped.y,
@@ -82,40 +118,72 @@ public class IMUManager : MonoBehaviour
             invertGyroZ ? -gyroRemapped.z : gyroRemapped.z
         );
 
-        // 3. Delta time
+        // 4. Compute dt
         float now = Time.time;
         float dt = now - lastUpdateTime;
         if (dt <= 0f) return;
         lastUpdateTime = now;
 
-        // 4. Raw gyro integration
+        // 5. Raw gyro integration: update sensorOrientationRaw
         Vector3 deltaEulerRaw = gyroUnity * dt * sensitivity;
-        Quaternion rawRotation = currentRotation * Quaternion.Euler(deltaEulerRaw);
+        Quaternion deltaRotationRaw = Quaternion.Euler(deltaEulerRaw);
+        sensorOrientationRaw = sensorOrientationRaw * deltaRotationRaw; // accumulate
 
-        // 5. Madgwick fusion
-        Quaternion fusionRotation = rawRotation;
+        // 6. Madgwick fusion: update madgwick quaternion
+        Quaternion fusionQuat = sensorOrientationRaw; // fallback if first
         if (useSensorFusion)
         {
             madgwick.SamplePeriod = dt;
             madgwick.Beta = madgwickBeta;
+            // Convert gyro to rad/s
             Vector3 gyroRad = gyroUnity * Mathf.Deg2Rad * sensitivity;
             madgwick.UpdateIMU(gyroRad.x, gyroRad.y, gyroRad.z,
                                accelUnity.x, accelUnity.y, accelUnity.z);
-            fusionRotation = madgwick.Quaternion;
+            fusionQuat = madgwick.Quaternion;
+
+            // On the very first fusion update, capture initialSensorOrientationFusion
+            if (initialSensorOrientationFusion == Quaternion.identity && !hasImuData)
+            {
+                // If paddle was initially flat or at any pose, fusionQuat represents that orientation.
+                initialSensorOrientationFusion = fusionQuat;
+            }
         }
 
-        // 6. Blend or choose
-        if (!hasImuData)
+        // 7. Determine sensorOrientation to apply onto initialPaddleRotation
+        Quaternion sensorOrientationToApply;
+        if (!useSensorFusion)
         {
-            currentRotation = useSensorFusion ? fusionRotation : rawRotation;
-            hasImuData = true;
+            // Raw integration case: apply sensorOrientationRaw directly
+            sensorOrientationToApply = sensorOrientationRaw;
         }
         else
         {
-            currentRotation = useSensorFusion
-                ? Quaternion.Slerp(rawRotation, fusionRotation, complementaryAlpha)
-                : rawRotation;
+            // Fusion case: compute delta from initialSensorOrientationFusion
+            // delta = inverse(initial) * current
+            // This yields a rotation representing change from initial sensor orientation to current orientation
+            Quaternion invInitial = Quaternion.Inverse(initialSensorOrientationFusion);
+            sensorOrientationToApply = invInitial * fusionQuat;
         }
+
+        // 8. Compute final paddle rotation: initialPaddleRotation * sensorOrientationToApply
+        Quaternion rawApplied = initialPaddleRotation * sensorOrientationToApply;
+
+        // 9. (Optional) blend rawApplied and fusionApplied? In this design, rawApplied already uses sensorOrientationToApply chosen above.
+        // If you still want complementary blending between raw gyro integration and fusion:
+        if (useSensorFusion && complementaryAlpha < 1f)
+        {
+            // Compute rawAppliedRaw = initialPaddleRotation * sensorOrientationRaw
+            Quaternion rawAppliedRaw = initialPaddleRotation * sensorOrientationRaw;
+            currentPaddleRotation = Quaternion.Slerp(rawAppliedRaw, rawApplied, complementaryAlpha);
+        }
+        else
+        {
+            currentPaddleRotation = rawApplied;
+        }
+
+        // 10. Mark that we have IMU data
+        if (!hasImuData)
+            hasImuData = true;
     }
 
     void OnDestroy()

@@ -24,11 +24,9 @@ public class Spline : MonoBehaviour
         }
 
         float u = uv.x;
-        Vector3[] points = new Vector3[controlPoints.Length];
-        for (int i = 0; i < controlPoints.Length; i++)
-        {
-            points[i] = controlPoints[i].position;
-        }
+        Vector3 p0 = controlPoints[0].position;
+        Vector3 p1 = controlPoints[1].position;
+        Vector3 p2 = controlPoints[2].position;
 
         // Continuous movement beyond endpoints
         if (continuousMovement)
@@ -36,34 +34,29 @@ public class Spline : MonoBehaviour
             if (u < 0f)
             {
                 float t = u * 2f; // extrapolate to the left
-                return points[0] + (points[0] - points[1]) * t;
+                return p0 + (p0 - p1) * t;
             }
             else if (u > 1f)
             {
                 float t = (u - 1f) * 2f; // extrapolate to the right
-                return points[2] + (points[2] - points[1]) * t;
+                return p2 + (p2 - p1) * t;
             }
         }
 
         // Exact endpoints with margin
-        if (u <= endpointMargin) return points[0];
-        if (u >= 1f - endpointMargin) return points[2];
+        if (u <= endpointMargin) return p0;
+        if (u >= 1f - endpointMargin) return p2;
 
-        // Clamp u to [0, 1] for interpolation only
+        // Clamp u to [0, 1]
         u = Mathf.Clamp01(u);
 
-        // Interpolate
-        if (u < 0.5f)
-        {
-            float t = u / 0.5f;
-            return Vector3.Lerp(points[0], points[1], t);
-        }
-        else
-        {
-            float t = (u - 0.5f) / 0.5f;
-            return Vector3.Lerp(points[1], points[2], t);
-        }
+        // Quadratic Bézier interpolation
+        float oneMinusU = 1f - u;
+        return oneMinusU * oneMinusU * p0 +
+               2f * oneMinusU * u * p1 +
+               u * u * p2;
     }
+
 
     public Vector3 GetDirection(Vector2 uv)
     {

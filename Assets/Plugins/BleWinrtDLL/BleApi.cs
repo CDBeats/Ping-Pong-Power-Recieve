@@ -83,9 +83,6 @@ public class BleApi
     [DllImport("BleWinrtDll.dll", EntryPoint = "PollData")]
     public static extern bool PollData(out BLEData data, bool block);
 
-    [DllImport("BleWinrtDll.dll", EntryPoint = "SendData")]
-    public static extern bool SendData(in BLEData data, bool block);
-
     [DllImport("BleWinrtDll.dll", EntryPoint = "Quit")]
     public static extern void Quit();
 

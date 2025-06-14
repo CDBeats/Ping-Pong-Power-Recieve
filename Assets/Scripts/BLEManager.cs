@@ -1,6 +1,9 @@
 ﻿using UnityEngine;
 using UnityEngine.UI;
 using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 
 public class BLEManager : MonoBehaviour
 {
@@ -9,11 +12,14 @@ public class BLEManager : MonoBehaviour
     public Text paddleStatusText;
 
     [Header("BLE Settings")]
-    public string expectedDeviceName = "Paddle 1";
+    public string primaryDeviceName = "Paddle 1";
+    public string alternateDeviceName = "Arduino";
     public string serviceUUID = "e7f94bb9-9b07-5db7-8fbb-6b1cdbb5399e";
     public string charUUID = "12340000-0000-0000-0000-000000000000";
     public float scanTimeoutSeconds = 30f;
     public int maxScanRetries = 2;
+    public float packetTimeoutSeconds = 5f;
+    public float connectedMessageDuration = 5f;
 
     public event Action<string, Vector3, Vector3> OnImuDataReceived;
 
@@ -22,6 +28,8 @@ public class BLEManager : MonoBehaviour
     private bool isScanningCharacteristics = false;
     private bool isSubscribed = false;
     private string lastError;
+    private float _lastPacketTime;
+    private HashSet<string> _scannedDeviceNames = new HashSet<string>();
 
     private PaddleState paddle;
 
@@ -41,24 +49,22 @@ public class BLEManager : MonoBehaviour
 
     void Start()
     {
-        BleApi.Quit(); // Ensures any previous BLE sessions are cleared.
-
+        BleApi.Quit();
         paddle = new PaddleState
         {
             charUUID = NormalizeUuid(charUUID)
         };
-
         if (bluetoothButton != null)
-            bluetoothButton.onClick.AddListener(() => StartScan());
-
+            bluetoothButton.onClick.AddListener(() => StartScan(true));
         lastError = "Ok";
         UpdateStatus("Ready to connect");
-
-        StartScan();
+        StartScan(true);
+        StartCoroutine(PollDataCoroutine());
     }
 
     void Update()
     {
+        // Device Scan
         if (isScanningDevices)
         {
             if (Time.time > paddle.timeoutAt)
@@ -68,10 +74,11 @@ public class BLEManager : MonoBehaviour
                     paddle.scanRetries++;
                     isScanningDevices = false;
                     BleApi.StopDeviceScan();
-                    StartScan();
+                    UpdateStatus($"Retry {paddle.scanRetries}/{maxScanRetries}...");
+                    StartScan(false);
                     return;
                 }
-                ResetScan("Timeout after retries, try again");
+                ResetScan("Paddle not found. Try again.");
                 return;
             }
 
@@ -82,11 +89,18 @@ public class BLEManager : MonoBehaviour
                 status = BleApi.PollDevice(ref du, false);
                 if (status == BleApi.ScanStatus.AVAILABLE)
                 {
-                    if (!string.IsNullOrEmpty(du.name) && du.name.Contains(expectedDeviceName))
+                    if (!string.IsNullOrEmpty(du.name) && !_scannedDeviceNames.Contains(du.name))
+                    {
+                        _scannedDeviceNames.Add(du.name);
+                        Debug.Log($"Found device: {du.name}");
+                    }
+
+                    // Check both device names
+                    if (!string.IsNullOrEmpty(du.name) &&
+                        (du.name == primaryDeviceName || du.name == alternateDeviceName))
                     {
                         isScanningDevices = false;
                         BleApi.StopDeviceScan();
-
                         paddle.deviceId = du.id;
                         paddle.deviceName = du.name;
                         UpdateStatus($"Found {du.name}, searching for service…");
@@ -97,6 +111,7 @@ public class BLEManager : MonoBehaviour
             } while (status == BleApi.ScanStatus.AVAILABLE);
         }
 
+        // Service Scan
         if (isScanningServices)
         {
             if (Time.time > paddle.timeoutAt)
@@ -112,9 +127,9 @@ public class BLEManager : MonoBehaviour
                 status = BleApi.PollService(out svc, false);
                 if (status == BleApi.ScanStatus.AVAILABLE)
                 {
+                    Debug.Log($"Found service: {svc.uuid}");
                     string normSvc = NormalizeUuid(svc.uuid);
                     string normTarget = NormalizeUuid(serviceUUID);
-
                     if (normSvc == normTarget)
                     {
                         isScanningServices = false;
@@ -125,8 +140,15 @@ public class BLEManager : MonoBehaviour
                     }
                 }
             } while (status == BleApi.ScanStatus.AVAILABLE);
+
+            if (status == BleApi.ScanStatus.FINISHED && paddle.serviceId == null)
+            {
+                ResetScan("Service not found on device");
+                return;
+            }
         }
 
+        // Characteristic Scan
         if (isScanningCharacteristics)
         {
             if (Time.time > paddle.timeoutAt)
@@ -142,45 +164,44 @@ public class BLEManager : MonoBehaviour
                 status = BleApi.PollCharacteristic(out chr, false);
                 if (status == BleApi.ScanStatus.AVAILABLE)
                 {
+                    Debug.Log($"Found characteristic: {chr.uuid}");
                     string normChr = NormalizeUuid(chr.uuid);
                     if (normChr == paddle.charUUID)
                     {
-                        // Optional: Uncomment if your plugin supports chr.properties
-                        // if (!CharacteristicCanNotify(chr)) continue;
-
                         isScanningCharacteristics = false;
-
                         bool subscribed = BleApi.SubscribeCharacteristic(paddle.deviceId, paddle.serviceId, chr.uuid, false);
                         BleApi.ErrorMessage em;
                         BleApi.GetError(out em);
-
-                        // Some APIs return "ok" even when subscription fails
                         string err = em.msg?.Trim().ToLower();
                         if (subscribed || err == "ok" || string.IsNullOrEmpty(err))
                         {
-                            // Don't set subscribed yet — wait for actual data to confirm in PumpData
                             UpdateStatus("Waiting for data…");
                         }
                         else
                         {
-                            UpdateStatus($"Sub failed: {em.msg}");
+                            UpdateStatus($"Subscription failed: {em.msg}");
                         }
-
                         return;
                     }
                 }
             } while (status == BleApi.ScanStatus.AVAILABLE);
-        }
 
-        BleApi.BLEData res = new BleApi.BLEData();
-        while (BleApi.PollData(out res, false))
-        {
-            if (res.deviceId == paddle.deviceId)
+            if (status == BleApi.ScanStatus.FINISHED)
             {
-                PumpData(res);
+                ResetScan("Characteristic not found on device");
+                return;
             }
         }
 
+        // Data Timeout Check
+        if (isSubscribed && Time.time - _lastPacketTime > packetTimeoutSeconds)
+        {
+            Debug.Log("Data timeout, restarting BLE scan...");
+            StartScan(true);
+            return;
+        }
+
+        // Error Handling
         BleApi.ErrorMessage emCheck;
         BleApi.GetError(out emCheck);
         if (!string.IsNullOrEmpty(emCheck.msg) && emCheck.msg != "Ok" && emCheck.msg != lastError)
@@ -191,11 +212,34 @@ public class BLEManager : MonoBehaviour
         }
     }
 
-    void StartScan()
+    IEnumerator PollDataCoroutine()
+    {
+        while (true)
+        {
+            BleApi.BLEData res = new BleApi.BLEData();
+            while (BleApi.PollData(out res, false))
+            {
+                if (res.deviceId == paddle.deviceId)
+                {
+                    PumpData(res);
+                }
+            }
+            yield return null;
+        }
+    }
+
+    public void StartScan(bool resetRetryCount = true)
     {
         if (isScanningDevices) return;
 
+        // Force cleanup existing connection
+        BleApi.Quit();
         ResetState();
+
+        if (resetRetryCount)
+            paddle.scanRetries = 0;
+
+        _scannedDeviceNames.Clear();
         isScanningDevices = true;
         paddle.timeoutAt = Time.time + scanTimeoutSeconds;
         BleApi.StartDeviceScan();
@@ -205,7 +249,6 @@ public class BLEManager : MonoBehaviour
     void StartServiceScan()
     {
         if (isScanningServices) return;
-
         isScanningServices = true;
         paddle.timeoutAt = Time.time + scanTimeoutSeconds;
         BleApi.ScanServices(paddle.deviceId);
@@ -214,7 +257,6 @@ public class BLEManager : MonoBehaviour
     void StartCharacteristicScan()
     {
         if (isScanningCharacteristics) return;
-
         isScanningCharacteristics = true;
         paddle.timeoutAt = Time.time + scanTimeoutSeconds;
         BleApi.ScanCharacteristics(paddle.deviceId, paddle.serviceId);
@@ -222,49 +264,56 @@ public class BLEManager : MonoBehaviour
 
     void ResetScan(string message)
     {
+        BleApi.Quit();
         isScanningDevices = false;
         isScanningServices = false;
         isScanningCharacteristics = false;
-        BleApi.StopDeviceScan();
         ResetState();
+        paddle.scanRetries = 0;
         UpdateStatus(message);
     }
 
     void ResetState()
     {
+        // Clear any pending data
+        BleApi.BLEData dummy;
+        while (BleApi.PollData(out dummy, false)) { }
+
         paddle.deviceId = null;
         paddle.serviceId = null;
         paddle.deviceName = "";
-        paddle.accelerometer = paddle.gyroscope = Vector3.zero;
+        paddle.accelerometer = Vector3.zero;
+        paddle.gyroscope = Vector3.zero;
         paddle.imuValid = false;
-        paddle.scanRetries = 0;
         isSubscribed = false;
     }
 
     void PumpData(BleApi.BLEData d)
     {
         if (d.size != 13) return;
-
         try
         {
+            byte[] buf = d.buf;
             paddle.accelerometer = new Vector3(
-                BitConverter.ToInt16(d.buf, 1) / 1000f,
-                BitConverter.ToInt16(d.buf, 3) / 1000f,
-                BitConverter.ToInt16(d.buf, 5) / 1000f
+                BitConverter.ToInt16(buf, 1) / 1000f,
+                BitConverter.ToInt16(buf, 3) / 1000f,
+                BitConverter.ToInt16(buf, 5) / 1000f
             );
             paddle.gyroscope = new Vector3(
-                BitConverter.ToInt16(d.buf, 7) / 10f,
-                BitConverter.ToInt16(d.buf, 9) / 10f,
-                BitConverter.ToInt16(d.buf, 11) / 10f
+                BitConverter.ToInt16(buf, 7) / 10f,
+                BitConverter.ToInt16(buf, 9) / 10f,
+                BitConverter.ToInt16(buf, 11) / 10f
             );
             paddle.imuValid = true;
+            _lastPacketTime = Time.time;
 
             if (!isSubscribed)
             {
                 isSubscribed = true;
+                lastError = "Ok";
                 UpdateStatus("Connected! Receiving data...");
+                StartCoroutine(ClearConnectedMessage());
             }
-
             OnImuDataReceived?.Invoke(paddle.playerId, paddle.accelerometer, paddle.gyroscope);
         }
         catch (Exception ex)
@@ -274,6 +323,11 @@ public class BLEManager : MonoBehaviour
         }
     }
 
+    private IEnumerator ClearConnectedMessage()
+    {
+        yield return new WaitForSeconds(connectedMessageDuration);
+        UpdateStatus(""); // Clear message after duration
+    }
 
     void UpdateStatus(string msg)
     {
@@ -286,14 +340,6 @@ public class BLEManager : MonoBehaviour
         return string.IsNullOrEmpty(u) ? "" :
             u.ToLowerInvariant().Replace("-", "").Replace("{", "").Replace("}", "").Trim('\0');
     }
-
-    // Optional: Uncomment if your BLE plugin provides `chr.properties`
-    /*
-    private bool CharacteristicCanNotify(BleApi.Characteristic chr)
-    {
-        return (chr.properties & 0x30) != 0; // 0x10 notify | 0x20 indicate
-    }
-    */
 
     void OnApplicationQuit()
     {

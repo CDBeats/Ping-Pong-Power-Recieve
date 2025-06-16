@@ -355,7 +355,7 @@ public class BLEManager : MonoBehaviour
     private IEnumerator ClearConnectedMessage()
     {
         yield return new WaitForSeconds(connectedMessageDuration);
-        UpdateStatus(""); // Clear message after duration
+        UpdateStatus("Ping\nPong\nPower\nRecieve");
     }
 
     void UpdateStatus(string msg)

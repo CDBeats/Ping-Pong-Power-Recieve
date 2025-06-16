@@ -2,193 +2,425 @@
 
 public class IMUManager : MonoBehaviour
 {
-    [Header("BLE Settings")]
+    [Header("Transforms")]
+    [SerializeField] private Transform paddleTransform;
+    [SerializeField] private Transform collisionTransform;
+
+    [Header("Rotation Settings")]
+    [Range(0f, 1f)]
+    [SerializeField] private float complementaryAlpha = 0.98f;
+    [Range(0f, 1f)]
+    [SerializeField] private float smoothingFactor = 0.9f;
+
+    [Header("One Euro Filter Settings")]
+    [SerializeField] private bool useOneEuroSmoothing = false;
+    [SerializeField] private float oneEuroMinCutoff = 1.0f;
+    [SerializeField] private float oneEuroBeta = 0.0f;
+
+    [Header("Calibration")]
+    [SerializeField] private bool enableCalibration = true;
+    [Range(1f, 5f)]
+    [SerializeField] private float calibrationTime = 3f;
+
+    [Header("Position Smoothing")]
+    [Range(0.5f, 5f)]
+    [SerializeField] private float positionSmoothing = 2.0f;
+
+    [Header("Stability Detection")]
+    [Range(0.001f, 2f)]
+    [SerializeField] private float accelStabilityThreshold = 0.2f;
+    [Range(0.1f, 10f)]
+    [SerializeField] private float gyroStabilityThreshold = 1.5f;
+    [Range(0.1f, 5f)]
+    [SerializeField] private float requiredStableDuration = 1.0f;
+
+    [Header("Drift Detection")]
+    [Range(0f, 45f)]
+    [SerializeField] private float driftAngleThreshold = 10f;
+
+    [Header("Assign References")]
+    [SerializeField] private Spline spline;
     [SerializeField] private BLEManager bleManager;
 
-    [Header("Paddle Transform")]
-    [SerializeField] private Transform paddleTransform;
+    [Header("Global Stability Settings")]
+    [SerializeField] private float resetCooldown = 0.2f;
+    [SerializeField] private float minStableTime = 0.5f;
 
-    [Header("Gyro/Accel Settings")]
-    [Range(0.5f, 2f)]
-    public float sensitivity = 1.0f;
-
-    [Tooltip("Use Madgwick sensor fusion. If false, uses raw gyro integration only.")]
-    public bool useSensorFusion = true;
-
-    [Range(0f, 1f)]
-    [Tooltip("Blend between raw gyro integration (0) and fusion (1).")]
-    public float complementaryAlpha = 1.0f;
-
-    [Tooltip("Madgwick beta parameter.")]
-    public float madgwickBeta = 0.1f;
-
-    [Header("Axis Inversion for Testing (Accel)")]
-    public bool invertAccelX = false;
-    public bool invertAccelY = false;
-    public bool invertAccelZ = false;
-
-    [Header("Axis Inversion for Testing (Gyro)")]
-    public bool invertGyroX = false;
-    public bool invertGyroY = false;
-    public bool invertGyroZ = false;
-
-    // Internal state
-    private Quaternion initialPaddleRotation;          // The localRotation of paddle at first IMU data
-    private bool firstImuReceived = false;
-
-    // For raw gyro integration:
-    private Quaternion sensorOrientationRaw = Quaternion.identity;
-
-    // For fusion:
-    private MadgwickAHRS madgwick;
-    private Quaternion initialSensorOrientationFusion = Quaternion.identity; // captured at first reading
-
-    private float lastUpdateTime;
+    // Internal runtime state
     private bool hasImuData = false;
+    private float lastUpdateTime = 0f;
+    private float lastResetTime = 0f;
+    private bool isStable = false;
+    private float stableStartTime = 0f;
+    private Quaternion neutralRotation = Quaternion.identity;
+    private float imuDataStartTime = 0f;
+    private float avgDt = 0.01f;
+    private Vector3 lastAlignedAcc = Vector3.zero;
+    private Vector3 gyroBias = Vector3.zero;
+    private Quaternion currentRotation = Quaternion.identity;
+    private Quaternion oneEuroFilteredRotation = Quaternion.identity;
+    private float lastGyroRadMag = 0f;
+    private float currentU = 0.5f;
+    private Vector3 collisionPreviousPosition = Vector3.zero;
+    private Vector3 collisionVelocity = Vector3.zero;
+    private bool isCalibrating = false;
+    private float calibrationStartTime = 0f;
+    private float biasAlpha = 0.01f;
 
     void Start()
     {
-        if (bleManager == null)
+        if (bleManager == null || spline == null || paddleTransform == null)
         {
-            Debug.LogError("BLEManager not assigned");
-            enabled = false;
-            return;
-        }
-        if (paddleTransform == null)
-        {
-            Debug.LogError("Paddle Transform not assigned");
+            Debug.LogError("IMUManager: Missing references (BLEManager, Spline, or paddleTransform). Disabling.");
             enabled = false;
             return;
         }
 
-        // Initialize but delay capturing initialPaddleRotation until first IMU reading
-        hasImuData = false;
-        firstImuReceived = false;
-        lastUpdateTime = Time.time;
-
-        // Initialize Madgwick (class assumed unchanged in your project)
-        madgwick = new MadgwickAHRS(1f / 50f, madgwickBeta);
-
-        // Subscribe
+        InitializeState();
         bleManager.OnImuDataReceived += HandleImuData;
+    }
+
+    private void InitializeState()
+    {
+        hasImuData = false;
+        lastUpdateTime = Time.time;
+        lastResetTime = Time.time;
+        stableStartTime = Time.time;
+        imuDataStartTime = 0f;
+        neutralRotation = Quaternion.identity;
+        currentRotation = Quaternion.identity;
+        oneEuroFilteredRotation = Quaternion.identity;
+        lastAlignedAcc = Vector3.zero;
+        gyroBias = Vector3.zero;
+        currentU = 0.5f;
+        isCalibrating = false;
+
+        if (collisionTransform != null)
+        {
+            collisionPreviousPosition = collisionTransform.position;
+            collisionVelocity = Vector3.zero;
+        }
+        else
+        {
+            Debug.LogWarning("IMUManager: collisionTransform not assigned; collision velocity disabled.");
+        }
     }
 
     void Update()
     {
-        // Only apply when we have IMU data
-        if (hasImuData)
+        if (!hasImuData)
         {
-            // currentPaddleRotation is updated in HandleImuData, so here we simply assign it
-            paddleTransform.localRotation = currentPaddleRotation;
+            ResetPaddleState();
+            return;
+        }
+
+        ProcessRotation();
+        HandleCalibration();
+        UpdatePaddlePosition();
+        UpdateCollisionVelocity();
+    }
+
+    private void ResetPaddleState()
+    {
+        paddleTransform.localRotation = Quaternion.identity;
+        if (collisionTransform != null)
+        {
+            collisionVelocity = Vector3.zero;
+            collisionPreviousPosition = collisionTransform.position;
         }
     }
 
-    // This holds the computed final paddle rotation each frame
-    private Quaternion currentPaddleRotation = Quaternion.identity;
-
-    private void HandleImuData(string playerId, Vector3 accRaw, Vector3 gyroRaw)
+    private void ProcessRotation()
     {
-        // 1. On first IMU data: capture initial paddle orientation and reset sensorOrientation state
-        if (!firstImuReceived)
+        Quaternion targetRot = neutralRotation * currentRotation;
+
+        if (useOneEuroSmoothing)
         {
-            initialPaddleRotation = paddleTransform.localRotation;
-            // Reset raw integration state
-            sensorOrientationRaw = Quaternion.identity;
-            // Reset Madgwick state
-            madgwick.Reset();
-            initialSensorOrientationFusion = Quaternion.identity; // will capture below after first fusion update
-            firstImuReceived = true;
-            // Reset timing
-            lastUpdateTime = Time.time;
+            ApplyOneEuroSmoothing(ref targetRot);
         }
 
-        // 2. Remap raw sensor axes → Unity axes
-        Vector3 accelRemapped = new Vector3(accRaw.x, accRaw.z, accRaw.y);
-        Vector3 gyroRemapped = new Vector3(gyroRaw.x, gyroRaw.z, gyroRaw.y);
+        ApplyRotationSmoothing(targetRot);
+    }
 
-        // 3. Apply per-axis inversion toggles
-        Vector3 accelUnity = new Vector3(
-            invertAccelX ? -accelRemapped.x : accelRemapped.x,
-            invertAccelY ? -accelRemapped.y : accelRemapped.y,
-            invertAccelZ ? -accelRemapped.z : accelRemapped.z
-        );
-        Vector3 gyroUnity = new Vector3(
-            invertGyroX ? -gyroRemapped.x : gyroRemapped.x,
-            invertGyroY ? -gyroRemapped.y : gyroRemapped.y,
-            invertGyroZ ? -gyroRemapped.z : gyroRemapped.z
-        );
+    private void ApplyOneEuroSmoothing(ref Quaternion targetRot)
+    {
+        float dt = Time.deltaTime;
+        float cutoff = oneEuroMinCutoff + oneEuroBeta * lastGyroRadMag;
+        float tau = 1f / (2f * Mathf.PI * cutoff);
+        float alpha = Mathf.Clamp01(dt / (tau + dt));
+        oneEuroFilteredRotation = Quaternion.Slerp(oneEuroFilteredRotation, targetRot, alpha);
+        oneEuroFilteredRotation.Normalize();
+        targetRot = oneEuroFilteredRotation;
+    }
 
-        // 4. Compute dt
+    private void ApplyRotationSmoothing(Quaternion targetRot)
+    {
+        float rotSmoothing = 1f - Mathf.Pow(1f - smoothingFactor, Time.deltaTime * 200f);
+        paddleTransform.localRotation = Quaternion.Slerp(
+            paddleTransform.localRotation,
+            targetRot,
+            rotSmoothing
+        );
+    }
+
+    private void HandleCalibration()
+    {
+        if (!enableCalibration) return;
+
+        if (isStable && Input.GetKeyDown(KeyCode.C))
+        {
+            isCalibrating = true;
+            calibrationStartTime = Time.time;
+        }
+
+        if (isCalibrating && Time.time - calibrationStartTime >= calibrationTime)
+        {
+            neutralRotation = Quaternion.Inverse(currentRotation);
+            isCalibrating = false;
+            Debug.Log("IMUManager: Calibration set.");
+        }
+    }
+
+    private void UpdatePaddlePosition()
+    {
+        float sinceStart = Time.time - imuDataStartTime;
+        float posLerp = Mathf.Clamp01(sinceStart / 0.5f);
+        Vector3 splinePos = spline.GetPoint(new Vector2(currentU, 0));
+        Vector3 curPos = paddleTransform.position;
+        Vector3 tgtPos = new Vector3(splinePos.x, curPos.y, curPos.z);
+
+        paddleTransform.position = Vector3.Lerp(
+            curPos,
+            tgtPos,
+            Time.deltaTime * positionSmoothing * posLerp
+        );
+    }
+
+    private void UpdateCollisionVelocity()
+    {
+        if (collisionTransform == null) return;
+
+        Vector3 currColPos = collisionTransform.position;
+        float dtCol = Time.deltaTime;
+        collisionVelocity = dtCol > 0f
+            ? (currColPos - collisionPreviousPosition) / dtCol
+            : Vector3.zero;
+        collisionPreviousPosition = currColPos;
+    }
+
+    private void AlignImuData(Vector3 rawAcc, Vector3 rawGyro, out Vector3 alignedAcc, out Vector3 alignedGyro)
+    {
+        // Unified alignment considering imu mounting
+        alignedGyro = new Vector3(-rawGyro.x, -rawGyro.z, rawGyro.y);
+        alignedAcc = new Vector3(-rawAcc.x, -rawAcc.z, rawAcc.y);
+    }
+
+    private float SmoothDt(float newDt, ref float avg)
+    {
+        avg = Mathf.Lerp(avg, newDt, 0.1f);
+        return Mathf.Clamp(avg, 0.001f, 0.1f);
+    }
+
+    private void ResetOrientation()
+    {
+        Vector3 bodyGravity = lastAlignedAcc.normalized;
+        Quaternion gravityAlignment = Quaternion.FromToRotation(bodyGravity, Vector3.down);
+        neutralRotation = Quaternion.Inverse(gravityAlignment);
+        currentRotation = gravityAlignment;
+        currentU = 0.5f;
+        lastResetTime = Time.time;
+        oneEuroFilteredRotation = gravityAlignment;
+        Debug.Log("IMUManager: Orientation reset after stability.");
+    }
+
+    private void UpdatePositionFromOrientation(Quaternion orientation)
+    {
+        Vector3 forehandEuler = new Vector3(-50f, 50f, 50f);
+        Vector3 backhandEuler = new Vector3(-50f, -50f, -50f);
+        Quaternion foreQ = Quaternion.Euler(forehandEuler);
+        Quaternion backQ = Quaternion.Euler(backhandEuler);
+
+        Vector3 foreDir = foreQ * Vector3.forward;
+        Vector3 backDir = backQ * Vector3.forward;
+        Vector3 currentDir = orientation * Vector3.forward;
+
+        Vector3 segment = foreDir - backDir;
+        Vector3 projected = Vector3.Project(currentDir - backDir, segment);
+        currentU = Mathf.Clamp01(Vector3.Dot(projected, segment.normalized) / segment.magnitude);
+    }
+
+    private void HandleImuData(string incomingId, Vector3 accRaw, Vector3 gyroRaw)
+    {
+        AlignImuData(accRaw, gyroRaw, out Vector3 accAligned, out Vector3 gyroAligned);
+
         float now = Time.time;
+        if (!hasImuData)
+        {
+            InitializeFirstIMUData(now, accAligned);
+            return;
+        }
+
+        ProcessIMUUpdate(now, accAligned, gyroAligned);
+    }
+
+    private void InitializeFirstIMUData(float timestamp, Vector3 accAligned)
+    {
+        hasImuData = true;
+        imuDataStartTime = timestamp;
+        lastAlignedAcc = accAligned;
+        lastResetTime = timestamp;
+
+        Vector3 bodyGravity = accAligned.normalized;
+        Quaternion gravityAlignment = Quaternion.FromToRotation(bodyGravity, Vector3.down);
+        neutralRotation = Quaternion.Inverse(gravityAlignment);
+        currentRotation = gravityAlignment;
+        oneEuroFilteredRotation = gravityAlignment;
+
+        lastUpdateTime = timestamp;
+    }
+
+    private void ProcessIMUUpdate(float now, Vector3 accAligned, Vector3 gyroAligned)
+    {
         float dt = now - lastUpdateTime;
         if (dt <= 0f) return;
+        dt = SmoothDt(dt, ref avgDt);
         lastUpdateTime = now;
 
-        // 5. Raw gyro integration: update sensorOrientationRaw
-        Vector3 deltaEulerRaw = gyroUnity * dt * sensitivity;
-        Quaternion deltaRotationRaw = Quaternion.Euler(deltaEulerRaw);
-        sensorOrientationRaw = sensorOrientationRaw * deltaRotationRaw; // accumulate
+        // Stability detection
+        float accelDelta = (accAligned - lastAlignedAcc).magnitude;
+        float gyroMag = gyroAligned.magnitude;
+        lastAlignedAcc = accAligned;
 
-        // 6. Madgwick fusion: update madgwick quaternion
-        Quaternion fusionQuat = sensorOrientationRaw; // fallback if first
-        if (useSensorFusion)
+        bool currentlyStable = accelDelta < accelStabilityThreshold &&
+                              gyroMag < gyroStabilityThreshold;
+
+        UpdateStabilityState(now, currentlyStable, gyroAligned);
+        CheckAutoReset(now);
+
+        if (!ShouldSkipFilterUpdate(now))
         {
-            madgwick.SamplePeriod = dt;
-            madgwick.Beta = madgwickBeta;
-            // Convert gyro to rad/s
-            Vector3 gyroRad = gyroUnity * Mathf.Deg2Rad * sensitivity;
-            madgwick.UpdateIMU(gyroRad.x, gyroRad.y, gyroRad.z,
-                               accelUnity.x, accelUnity.y, accelUnity.z);
-            fusionQuat = madgwick.Quaternion;
-
-            // On the very first fusion update, capture initialSensorOrientationFusion
-            if (initialSensorOrientationFusion == Quaternion.identity && !hasImuData)
-            {
-                // If paddle was initially flat or at any pose, fusionQuat represents that orientation.
-                initialSensorOrientationFusion = fusionQuat;
-            }
+            UpdateRotation(gyroAligned, accAligned, dt);
         }
 
-        // 7. Determine sensorOrientation to apply onto initialPaddleRotation
-        Quaternion sensorOrientationToApply;
-        if (!useSensorFusion)
-        {
-            // Raw integration case: apply sensorOrientationRaw directly
-            sensorOrientationToApply = sensorOrientationRaw;
-        }
-        else
-        {
-            // Fusion case: compute delta from initialSensorOrientationFusion
-            // delta = inverse(initial) * current
-            // This yields a rotation representing change from initial sensor orientation to current orientation
-            Quaternion invInitial = Quaternion.Inverse(initialSensorOrientationFusion);
-            sensorOrientationToApply = invInitial * fusionQuat;
-        }
-
-        // 8. Compute final paddle rotation: initialPaddleRotation * sensorOrientationToApply
-        Quaternion rawApplied = initialPaddleRotation * sensorOrientationToApply;
-
-        // 9. (Optional) blend rawApplied and fusionApplied? In this design, rawApplied already uses sensorOrientationToApply chosen above.
-        // If you still want complementary blending between raw gyro integration and fusion:
-        if (useSensorFusion && complementaryAlpha < 1f)
-        {
-            // Compute rawAppliedRaw = initialPaddleRotation * sensorOrientationRaw
-            Quaternion rawAppliedRaw = initialPaddleRotation * sensorOrientationRaw;
-            currentPaddleRotation = Quaternion.Slerp(rawAppliedRaw, rawApplied, complementaryAlpha);
-        }
-        else
-        {
-            currentPaddleRotation = rawApplied;
-        }
-
-        // 10. Mark that we have IMU data
-        if (!hasImuData)
-            hasImuData = true;
+        // Drift detection is still calculated but doesn't log warnings
+        CheckDrift(accAligned);
+        UpdatePositionFromOrientation(currentRotation);
     }
+
+    private void UpdateStabilityState(float timestamp, bool currentlyStable, Vector3 gyroAligned)
+    {
+        if (currentlyStable)
+        {
+            if (!isStable) stableStartTime = timestamp;
+            isStable = true;
+            gyroBias = Vector3.Lerp(gyroBias, gyroAligned, biasAlpha);
+        }
+        else
+        {
+            stableStartTime = timestamp;
+            isStable = false;
+        }
+    }
+
+    private void CheckAutoReset(float timestamp)
+    {
+        float stableDuration = timestamp - stableStartTime;
+        float timeSinceReset = timestamp - lastResetTime;
+        bool warmingUp = (timestamp - imuDataStartTime) < minStableTime;
+
+        if (!warmingUp && isStable &&
+            stableDuration >= requiredStableDuration &&
+            timeSinceReset >= resetCooldown)
+        {
+            ResetOrientation();
+        }
+    }
+
+    private bool ShouldSkipFilterUpdate(float timestamp)
+    {
+        bool warmingUp = (timestamp - imuDataStartTime) < minStableTime;
+        return warmingUp || (isStable && (timestamp - stableStartTime) >= requiredStableDuration);
+    }
+
+    private void UpdateRotation(Vector3 gyroAligned, Vector3 accAligned, float dt)
+    {
+        // Convert to radians and apply bias correction
+        Vector3 gyroRad = (gyroAligned - (isStable ? gyroBias : Vector3.zero)) * Mathf.Deg2Rad;
+        lastGyroRadMag = gyroRad.magnitude;
+
+        // Create rotation from gyro
+        Quaternion deltaRotation = Quaternion.Euler(
+            gyroRad.x * Mathf.Rad2Deg * dt,
+            gyroRad.y * Mathf.Rad2Deg * dt,
+            gyroRad.z * Mathf.Rad2Deg * dt
+        );
+
+        // Apply rotation
+        currentRotation *= deltaRotation;
+
+        // Apply accelerometer correction to pitch/roll only
+        ApplyAccelerometerCorrection(accAligned);
+    }
+
+    private void ApplyAccelerometerCorrection(Vector3 accAligned)
+    {
+        if (accAligned.sqrMagnitude < 0.01f) return;
+
+        Vector3 measuredGravity = accAligned.normalized;
+        Vector3 currentGravity = currentRotation * Vector3.up;
+
+        // Isolate horizontal components
+        Vector3 measuredHorizontal = new Vector3(measuredGravity.x, 0, measuredGravity.z).normalized;
+        Vector3 currentHorizontal = new Vector3(currentGravity.x, 0, currentGravity.z).normalized;
+
+        if (measuredHorizontal.sqrMagnitude > 0.01f &&
+            currentHorizontal.sqrMagnitude > 0.01f)
+        {
+            float angle = Vector3.SignedAngle(currentHorizontal, measuredHorizontal, Vector3.up);
+            Quaternion correction = Quaternion.AngleAxis(angle * (1f - complementaryAlpha), Vector3.up);
+            currentRotation = correction * currentRotation;
+            currentRotation.Normalize();
+        }
+    }
+
+    private void CheckDrift(Vector3 accAligned)
+    {
+        // Drift detection is still calculated but doesn't log warnings
+        // This function is kept for potential future use
+        if (!isStable) return;
+
+        Vector3 accNorm = accAligned.normalized;
+        Vector3 expectedBodyGravity = currentRotation * Vector3.up;
+
+        // Calculation still happens but results aren't used
+        float dot = Mathf.Clamp(Vector3.Dot(accNorm, expectedBodyGravity), -1f, 1f);
+        float angleDeg = Mathf.Acos(dot) * Mathf.Rad2Deg;
+        float accMag = accAligned.magnitude;
+    }
+
+    public Transform GetCollisionTransform() => collisionTransform;
+    public Vector3 GetCollisionVelocity() => collisionVelocity;
 
     void OnDestroy()
     {
         if (bleManager != null)
             bleManager.OnImuDataReceived -= HandleImuData;
+    }
+
+    void OnDrawGizmos()
+    {
+        if (!Application.isPlaying || !hasImuData) return;
+
+        // Measured gravity (red)
+        Vector3 measuredBodyGravity = lastAlignedAcc.normalized;
+        Vector3 worldGravityMeas = paddleTransform.TransformDirection(measuredBodyGravity);
+        Gizmos.color = Color.red;
+        Gizmos.DrawRay(paddleTransform.position, worldGravityMeas * 0.5f);
+
+        // Expected gravity (green)
+        Vector3 expectedBodyGravity = currentRotation * Vector3.up;
+        Vector3 worldGravityExpected = paddleTransform.TransformDirection(expectedBodyGravity);
+        Gizmos.color = Color.green;
+        Gizmos.DrawRay(paddleTransform.position, worldGravityExpected * 0.5f);
     }
 }

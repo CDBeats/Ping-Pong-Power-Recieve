@@ -12,12 +12,12 @@ public class BLEManager : MonoBehaviour
     public Text paddleStatusText;
 
     [Header("BLE Settings")]
-    public string primaryDeviceName = "Paddle";
+    public string primaryDeviceName = "Paddle 1";
     public string alternateDeviceName = "Arduino";
     public string serviceUUID = "e7f94bb9-9b07-5db7-8fbb-6b1cdbb5399e";
     public string charUUID = "12340000-0000-0000-0000-000000000000";
     public float scanTimeoutSeconds = 30f;
-    public int maxScanRetries = 2;
+    public int maxScanRetries = 3;  // Increased retries
     public float packetTimeoutSeconds = 5f;
     public float connectedMessageDuration = 5f;
 
@@ -30,8 +30,6 @@ public class BLEManager : MonoBehaviour
     private string lastError;
     private float _lastPacketTime;
     private HashSet<string> _scannedDeviceNames = new HashSet<string>();
-    private float lastLogTime;
-    private int packetCount;
 
     private PaddleState paddle;
 
@@ -60,12 +58,19 @@ public class BLEManager : MonoBehaviour
             bluetoothButton.onClick.AddListener(() => StartScan(true));
         lastError = "Ok";
         UpdateStatus("Ready to connect");
+        StartCoroutine(DelayedStartScan());
+    }
+
+    IEnumerator DelayedStartScan()
+    {
+        yield return new WaitForSeconds(1f); // Give BLE stack time to initialize
         StartScan(true);
         StartCoroutine(PollDataCoroutine());
     }
 
     void Update()
     {
+        // Device Scan
         if (isScanningDevices)
         {
             if (Time.time > paddle.timeoutAt)
@@ -96,6 +101,7 @@ public class BLEManager : MonoBehaviour
                         Debug.Log($"Found device: {du.name}");
                     }
 
+                    // Check both device names
                     if (!string.IsNullOrEmpty(du.name) &&
                         (du.name == primaryDeviceName || du.name == alternateDeviceName))
                     {
@@ -111,11 +117,12 @@ public class BLEManager : MonoBehaviour
             } while (status == BleApi.ScanStatus.AVAILABLE);
         }
 
+        // Service Scan
         if (isScanningServices)
         {
             if (Time.time > paddle.timeoutAt)
             {
-                ResetScan("Service scan timeout");
+                HandleScanError("Service scan timeout");
                 return;
             }
 
@@ -142,16 +149,17 @@ public class BLEManager : MonoBehaviour
 
             if (status == BleApi.ScanStatus.FINISHED && paddle.serviceId == null)
             {
-                ResetScan("Service not found on device");
+                HandleScanError("Service not found on device");
                 return;
             }
         }
 
+        // Characteristic Scan
         if (isScanningCharacteristics)
         {
             if (Time.time > paddle.timeoutAt)
             {
-                ResetScan("Characteristic scan timeout");
+                HandleScanError("Characteristic scan timeout");
                 return;
             }
 
@@ -186,11 +194,12 @@ public class BLEManager : MonoBehaviour
 
             if (status == BleApi.ScanStatus.FINISHED)
             {
-                ResetScan("Characteristic not found on device");
+                HandleScanError("Characteristic not found on device");
                 return;
             }
         }
 
+        // Data Timeout Check
         if (isSubscribed && Time.time - _lastPacketTime > packetTimeoutSeconds)
         {
             Debug.Log("Data timeout, restarting BLE scan...");
@@ -198,19 +207,42 @@ public class BLEManager : MonoBehaviour
             return;
         }
 
+        // Error Handling
         BleApi.ErrorMessage emCheck;
         BleApi.GetError(out emCheck);
         if (!string.IsNullOrEmpty(emCheck.msg) && emCheck.msg != "Ok" && emCheck.msg != lastError)
         {
             Debug.Log($"[BLE] Error: {emCheck.msg}");
             lastError = emCheck.msg;
-            UpdateStatus($"Error: {emCheck.msg}");
+
+            // Handle characteristic scanning errors specifically
+            if (emCheck.msg.Contains("scanning characteristics"))
+            {
+                HandleScanError("Characteristic scan error");
+            }
+            else
+            {
+                UpdateStatus($"Error: {emCheck.msg}");
+            }
+        }
+    }
+
+    private void HandleScanError(string message)
+    {
+        if (paddle.scanRetries < maxScanRetries)
+        {
+            paddle.scanRetries++;
+            ResetScan($"Error: {message}. Retrying {paddle.scanRetries}/{maxScanRetries}...");
+            StartScan(false);
+        }
+        else
+        {
+            ResetScan(message);
         }
     }
 
     IEnumerator PollDataCoroutine()
     {
-        float pollInterval = 0.02f; // 50 Hz
         while (true)
         {
             BleApi.BLEData res = new BleApi.BLEData();
@@ -221,7 +253,7 @@ public class BLEManager : MonoBehaviour
                     PumpData(res);
                 }
             }
-            yield return new WaitForSeconds(pollInterval);
+            yield return null;
         }
     }
 
@@ -229,6 +261,7 @@ public class BLEManager : MonoBehaviour
     {
         if (isScanningDevices) return;
 
+        // Force cleanup existing connection
         BleApi.Quit();
         ResetState();
 
@@ -271,6 +304,7 @@ public class BLEManager : MonoBehaviour
 
     void ResetState()
     {
+        // Clear any pending data
         BleApi.BLEData dummy;
         while (BleApi.PollData(out dummy, false)) { }
 
@@ -302,14 +336,6 @@ public class BLEManager : MonoBehaviour
             paddle.imuValid = true;
             _lastPacketTime = Time.time;
 
-            packetCount++;
-            if (Time.time - lastLogTime >= 1f)
-            {
-                Debug.Log($"IMU Data Rate: {packetCount} Hz");
-                packetCount = 0;
-                lastLogTime = Time.time;
-            }
-
             if (!isSubscribed)
             {
                 isSubscribed = true;
@@ -329,7 +355,7 @@ public class BLEManager : MonoBehaviour
     private IEnumerator ClearConnectedMessage()
     {
         yield return new WaitForSeconds(connectedMessageDuration);
-        UpdateStatus("");
+        UpdateStatus(""); // Clear message after duration
     }
 
     void UpdateStatus(string msg)

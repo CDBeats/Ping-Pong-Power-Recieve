@@ -68,12 +68,6 @@ public class IMUManager : MonoBehaviour
     private float calibrationStartTime = 0f;
     private float biasAlpha = 0.01f;
 
-    // New fields for tracking the ball's y-position
-    [Header("Ball Tracking")]
-    [SerializeField] private float yTrackingSpeed = 5f; // Speed at which paddle moves towards ball's y-position
-    private bool shouldTrackBallY = false;              // Flag to enable/disable tracking
-    private Transform ballTransform = null;             // Reference to the ball's transform
-
     // IMU status event
     public UnityEvent<bool> onImuStatusChanged = new UnityEvent<bool>();
 
@@ -104,8 +98,6 @@ public class IMUManager : MonoBehaviour
         gyroBias = Vector3.zero;
         currentU = 0.5f;
         isCalibrating = false;
-        shouldTrackBallY = false; // Initialize tracking flag
-        ballTransform = null;     // Initialize ball reference
 
         if (collisionTransform != null)
         {
@@ -202,20 +194,12 @@ public class IMUManager : MonoBehaviour
 
         float lerpFactor = Time.deltaTime * positionSmoothing * posLerp;
 
-        if (shouldTrackBallY && ballTransform != null)
-        {
-            float xLerp = Mathf.Lerp(curPos.x, splinePos.x, lerpFactor);
-            float yLerp = Mathf.Lerp(curPos.y, ballTransform.position.y, Time.deltaTime * yTrackingSpeed);
-            paddleTransform.position = new Vector3(xLerp, yLerp, curPos.z);
-        }
-        else
-        {
-            paddleTransform.position = new Vector3(
-                Mathf.Lerp(curPos.x, splinePos.x, lerpFactor),
-                curPos.y,
-                curPos.z
-            );
-        }
+        // Simply move to spline position (both x and y)
+        paddleTransform.position = Vector3.Lerp(
+            curPos,
+            splinePos,
+            lerpFactor
+        );
     }
 
     private void UpdateCollisionVelocity()
@@ -446,18 +430,5 @@ public class IMUManager : MonoBehaviour
         Vector3 worldGravityExpected = paddleTransform.TransformDirection(expectedBodyGravity);
         Gizmos.color = Color.green;
         Gizmos.DrawRay(paddleTransform.position, worldGravityExpected * 0.5f);
-    }
-
-    // Public methods to start and stop tracking the ball's y-position
-    public void StartTrackingBallY(Transform ball)
-    {
-        shouldTrackBallY = true;
-        ballTransform = ball;
-    }
-
-    public void StopTrackingBallY()
-    {
-        shouldTrackBallY = false;
-        ballTransform = null;
     }
 }

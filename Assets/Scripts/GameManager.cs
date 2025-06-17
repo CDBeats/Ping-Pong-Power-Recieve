@@ -2,6 +2,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 using TMPro;
+using System.Collections;
 using System.Collections.Generic;
 
 public class GameManager : MonoBehaviour
@@ -13,14 +14,12 @@ public class GameManager : MonoBehaviour
     [Tooltip("Reference to the ball prefab (with BallController, Rigidbody, Collider, Renderer).")]
     [SerializeField] private GameObject ballPrefab;
 
-    [Tooltip("Play Button to spawn & launch a new ball when IMU is ready.")]
-    [SerializeField] private Button playButton;
-
-    [Tooltip("Connection message GameObject (e.g., UI Panel) to show when IMU not ready.")]
-    [SerializeField] private GameObject connectionMessage;
-
-    [Tooltip("Text to show cumulative score.")]
+    [Header("UI Components")]
     [SerializeField] private TMP_Text scoreText;
+    [SerializeField] private TMP_Text ballsText;
+    [SerializeField] private TMP_Text highScoreText;
+    [SerializeField] private Button playButton;
+    [SerializeField] private GameObject connectionMessage;
 
     [Header("Physics Settings (for each ball)")]
     [SerializeField] private float ballMass = 0.0027f;
@@ -51,19 +50,32 @@ public class GameManager : MonoBehaviour
     [SerializeField][Min(0f)] private float biasPower = 1f;
 
     [Header("Spawn Settings")]
-    [Tooltip("Optional spawn origin. If null, uses world origin (0,0,0) and world forward.")]
+    [Tooltip("Optional spawn origin. If null, uses world origin (0,0,0) and world forward).")]
     [SerializeField] private Transform spawnOrigin;
 
     [Tooltip("Random offset radius around spawnOrigin to avoid exact overlap.")]
     [SerializeField] private float spawnRadius = 0.5f;
 
-    [Header("Gizmo Settings")]
-    [Tooltip("Number of sample rays to draw across the arc. 1 means only the middle direction.")]
-    [SerializeField][Min(1)] private int gizmoSampleCount = 5;
+    [Header("Game Settings")]
+    [Tooltip("Total number of balls to launch in one session.")]
+    [SerializeField] private int totalBalls = 20;
+
+    [Tooltip("Initial fixed delay (in seconds) before the first ball is launched.")]
+    [SerializeField] private float initialDelay = 3f;
+
+    [Tooltip("Fixed delay (in seconds) between each ball launch.")]
+    [SerializeField] private float betweenBallDelay = 2f;
 
     // Internal tracking
     private int totalScore = 0;
+    private int highScore = 0;
+    private int ballsRemaining = 0;
+    private int ballsLaunched = 0;
     private List<BallController> activeBalls = new List<BallController>();
+    private const string HighScoreKey = "HighScore";
+    private Vector3 savedSpawnPosition;
+    private Quaternion savedSpawnRotation;
+    private bool gameActive = false;
 
     void Awake()
     {
@@ -71,27 +83,44 @@ public class GameManager : MonoBehaviour
         Vector3 originalGravity = Physics.gravity;
         Physics.gravity = originalGravity * gravityScale;
         Debug.Log($"[GameManager] Gravity scaled to {gravityScale * 100f}%");
+
+        // Load high score from PlayerPrefs
+        highScore = PlayerPrefs.GetInt(HighScoreKey, 0);
+
+        // Save original spawn position/rotation
+        if (spawnOrigin != null)
+        {
+            savedSpawnPosition = spawnOrigin.position;
+            savedSpawnRotation = spawnOrigin.rotation;
+        }
+        else
+        {
+            savedSpawnPosition = Vector3.zero;
+            savedSpawnRotation = Quaternion.identity;
+        }
     }
 
     void Start()
     {
-        // UI setup
+        // Initialize UI
+        ballsRemaining = totalBalls;
+        UpdateUI();
+
+        // Set play button initially invisible
         if (playButton != null)
         {
-            playButton.onClick.AddListener(OnPlayButtonClicked);
             playButton.gameObject.SetActive(false);
+            playButton.onClick.AddListener(OnPlayButtonClicked);
         }
+
         if (connectionMessage != null)
             connectionMessage.SetActive(true);
-
-        UpdateScoreDisplay();
 
         // IMU status listener
         if (imuManager != null)
         {
             imuManager.onImuStatusChanged.AddListener(HandleImuStatusChanged);
-            bool initialReady = imuManager.HasValidData();
-            HandleImuStatusChanged(initialReady);
+            HandleImuStatusChanged(imuManager.HasValidData());
         }
         else
         {
@@ -119,14 +148,80 @@ public class GameManager : MonoBehaviour
 
     private void OnPlayButtonClicked()
     {
-        SpawnAndLaunchBall();
+        if (playButton != null)
+            playButton.gameObject.SetActive(false);
+
+        ResetSessionState();
+        gameActive = true;
+        StartCoroutine(BallLaunchSequence());
+    }
+
+    private void ResetSessionState()
+    {
+        // Reset score and ball counters for a fresh session
+        totalScore = 0;
+        ballsLaunched = 0;
+        ballsRemaining = totalBalls;
+        UpdateUI();
+
+        // Destroy any lingering active balls
+        foreach (var bc in activeBalls)
+        {
+            if (bc != null)
+                Destroy(bc.gameObject);
+        }
+        activeBalls.Clear();
+    }
+
+    private IEnumerator BallLaunchSequence()
+    {
+        // Initial fixed delay before first ball
+        if (initialDelay > 0f)
+            yield return new WaitForSeconds(initialDelay);
+
+        // Launch balls at fixed intervals from the previous launch
+        while (ballsLaunched < totalBalls && gameActive)
+        {
+            SpawnAndLaunchBall();
+            ballsLaunched++;
+            ballsRemaining--;
+            UpdateUI();
+
+            // Wait exactly betweenBallDelay before next launch
+            if (ballsLaunched < totalBalls && gameActive)
+            {
+                float delay = betweenBallDelay;
+                if (delay < 0f) delay = 0f;
+                Debug.Log($"[GameManager] Waiting {delay:F2}s before next launch (ball #{ballsLaunched + 1}).");
+                yield return new WaitForSeconds(delay);
+            }
+        }
+
+        Debug.Log($"[GameManager] All {totalBalls} balls launched. Waiting for remaining balls to finish.");
+        // After launching all, wait for any still-active balls to finish before ending session
+        yield return StartCoroutine(WaitForBallCompletion());
+
+        Debug.Log("[GameManager] All active balls completed. Game complete.");
+        CheckHighScore();
+
+        // Show play button again after game ends, if still connected
+        if (playButton != null && imuManager != null && imuManager.HasValidData())
+            playButton.gameObject.SetActive(true);
+
+        gameActive = false;
+    }
+
+    private IEnumerator WaitForBallCompletion()
+    {
+        // Wait until all active balls are gone
+        while (activeBalls.Count > 0)
+        {
+            yield return null;
+        }
     }
 
     /// <summary>
     /// Instantiate a new ball, configure it, and launch it with an angle-based direction.
-    /// The “middle” orientation is given by middleEulerAngles.
-    /// The launch direction is rotated around Y by a biased random angle in [-halfYaw, +halfYaw],
-    /// where halfYaw = separationYawDegrees/2, using biasPower to favor extremes.
     /// </summary>
     public void SpawnAndLaunchBall()
     {
@@ -136,22 +231,17 @@ public class GameManager : MonoBehaviour
             return;
         }
 
-        // Determine spawn position & rotation
-        Vector3 spawnPos = Vector3.zero;
-        Quaternion spawnRot = Quaternion.identity;
-        if (spawnOrigin != null)
+        // Determine spawnPos/spawnRot
+        Vector3 spawnPos = savedSpawnPosition;
+        Quaternion spawnRot = savedSpawnRotation;
+        if (spawnRadius > 0f)
         {
             Vector2 circle = Random.insideUnitCircle * spawnRadius;
-            spawnPos = spawnOrigin.position + new Vector3(circle.x, 0f, circle.y);
-            spawnRot = spawnOrigin.rotation;
-        }
-        else
-        {
-            spawnPos = Vector3.zero;
-            spawnRot = Quaternion.identity;
+            spawnPos += new Vector3(circle.x, 0f, circle.y);
         }
 
-        // Ensure desiredSpeed is positive
+        // Compute initialVelocity BEFORE instantiating, so it's in scope
+        // Ensure desiredSpeed > 0
         if (desiredSpeed <= 0f)
         {
             Debug.LogWarning("[GameManager] desiredSpeed must be > 0. Setting to 1.");
@@ -159,39 +249,39 @@ public class GameManager : MonoBehaviour
         }
 
         float halfYaw = separationYawDegrees * 0.5f;
-
-        // Biased sampling for yaw offset:
-        // We want magnitude m ∈ [0,1] with PDF ∝ m^biasPower, so extremes (m near 1) more likely.
-        // Sample u ∈ [0,1]; set m = u^(1/(biasPower+1)). Then offset = m * halfYaw.
         float u = Random.value;
-        float m;
-        if (biasPower > 0f)
-            m = Mathf.Pow(u, 1f / (biasPower + 1f));
-        else
-            m = u; // biasPower=0 => uniform in [0,1]
-        // Random sign ±
+        float m = biasPower > 0f ? Mathf.Pow(u, 1f / (biasPower + 1f)) : u;
         float sign = (Random.value < 0.5f) ? -1f : 1f;
         float yawOffset = sign * m * halfYaw;
 
-        // Base orientation: spawnOrigin rotation or identity
-        Quaternion baseRot = (spawnOrigin != null) ? spawnOrigin.rotation : Quaternion.identity;
-        // Middle orientation
+        Quaternion baseRot = spawnRot;
         Quaternion middleRot = Quaternion.Euler(middleEulerAngles);
-        // Combine: first baseRot, then middleRot
         Quaternion baseWithMiddle = baseRot * middleRot;
-        // Then yaw offset around Y:
         Quaternion yawRot = Quaternion.Euler(0f, yawOffset, 0f);
         Quaternion launchRot = baseWithMiddle * yawRot;
 
-        // Direction vector
-        Vector3 dir = launchRot * Vector3.forward; // unit length
-        Vector3 initialVelocity = dir * desiredSpeed;
+        Vector3 dir = launchRot * Vector3.forward;
+        Vector3 initialVelocity = dir * desiredSpeed;  // computed here
 
-        Debug.Log($"[GameManager] Spawn direction: middleEuler={middleEulerAngles}, yawOffset={yawOffset:F2}°, dir={dir}, initialVelocity={initialVelocity}");
-
-        // Instantiate and configure BallController
+        // Instantiate prefab
         GameObject newObj = Instantiate(ballPrefab, spawnPos, spawnRot);
-        newObj.name = $"Ball_{activeBalls.Count + 1}";
+        newObj.name = $"Ball_{ballsLaunched + 1}";
+
+        // Enable Colliders on the instantiated ball if the prefab had them disabled
+        Collider[] colliders = newObj.GetComponentsInChildren<Collider>(true);
+        foreach (var col in colliders)
+        {
+            col.enabled = true;
+            // If prefab used isTrigger = true, you could also set col.isTrigger = false;
+        }
+
+        // Ensure correct layer so physics behave as intended (if you use a “Ball” layer)
+        int ballLayer = LayerMask.NameToLayer("Ball");
+        if (ballLayer != -1)
+        {
+            SetLayerRecursively(newObj, ballLayer);
+        }
+
         BallController bc = newObj.GetComponent<BallController>();
         if (bc == null)
         {
@@ -200,7 +290,7 @@ public class GameManager : MonoBehaviour
             return;
         }
 
-        // Setup with initialVelocity
+        // Setup and launch with computed initialVelocity
         bc.Setup(
             imuManager,
             ballMass, linearDamping, angularDamping,
@@ -212,16 +302,14 @@ public class GameManager : MonoBehaviour
         bc.OnLost += HandleBallLost;
 
         activeBalls.Add(bc);
-        Debug.Log($"[GameManager] Spawned {newObj.name} at {spawnPos}");
-
-        // Launch it
+        Debug.Log($"[GameManager] Spawned {newObj.name} at {spawnPos} with initialVelocity {initialVelocity}");
         bc.Launch();
     }
 
     private void HandleBallScored(BallController ball)
     {
         totalScore++;
-        UpdateScoreDisplay();
+        UpdateUI();
         Debug.Log($"[GameManager] Ball {ball.name} scored. Total score: {totalScore}");
         activeBalls.Remove(ball);
     }
@@ -232,10 +320,28 @@ public class GameManager : MonoBehaviour
         activeBalls.Remove(ball);
     }
 
-    private void UpdateScoreDisplay()
+    private void UpdateUI()
     {
         if (scoreText != null)
             scoreText.text = $"Score: {totalScore}";
+
+        if (ballsText != null)
+            ballsText.text = $"Balls: {ballsRemaining}";
+
+        if (highScoreText != null)
+            highScoreText.text = $"High Score: {highScore}";
+    }
+
+    private void CheckHighScore()
+    {
+        if (totalScore > highScore)
+        {
+            highScore = totalScore;
+            PlayerPrefs.SetInt(HighScoreKey, highScore);
+            PlayerPrefs.Save();
+            UpdateUI();
+            Debug.Log($"New high score: {highScore}");
+        }
     }
 
     /// <summary>
@@ -252,55 +358,23 @@ public class GameManager : MonoBehaviour
         if (resetScore)
         {
             totalScore = 0;
-            UpdateScoreDisplay();
+            ballsLaunched = 0;
+            ballsRemaining = totalBalls;
+            UpdateUI();
         }
+
         Debug.Log("[GameManager] All balls destroyed. Score reset: " + resetScore);
     }
 
-#if UNITY_EDITOR
-    void OnDrawGizmos()
+    /// <summary>
+    /// Recursively set layer on GameObject and all its children.
+    /// </summary>
+    private void SetLayerRecursively(GameObject obj, int newLayer)
     {
-        // Visualize the arc of possible launch vectors from spawn origin, with sample count gizmoSampleCount.
-        Gizmos.color = Color.yellow;
-        Vector3 basePos = (spawnOrigin != null) ? spawnOrigin.position : transform.position;
-        Quaternion baseRot = (spawnOrigin != null) ? spawnOrigin.rotation : Quaternion.identity;
-
-        Quaternion middleRot = Quaternion.Euler(middleEulerAngles);
-        Quaternion baseWithMiddle = baseRot * middleRot;
-
-        float halfYaw = separationYawDegrees * 0.5f;
-
-        if (gizmoSampleCount <= 1)
+        obj.layer = newLayer;
+        foreach (Transform child in obj.transform)
         {
-            // Only middle direction
-            Vector3 dirMid = (baseWithMiddle * Quaternion.Euler(0f, 0f, 0f)) * Vector3.forward;
-            float drawScale = 0.1f;
-            Gizmos.DrawLine(basePos, basePos + dirMid * desiredSpeed * drawScale);
-            Gizmos.DrawSphere(basePos + dirMid * desiredSpeed * drawScale, 0.07f);
-        }
-        else
-        {
-            // Evenly spaced yaw offsets from -halfYaw to +halfYaw
-            for (int i = 0; i < gizmoSampleCount; i++)
-            {
-                float t = (float)i / (gizmoSampleCount - 1); // 0 to 1
-                float yawOffset = Mathf.Lerp(-halfYaw, halfYaw, t);
-                Quaternion yawRot = Quaternion.Euler(0f, yawOffset, 0f);
-                Vector3 dirSample = (baseWithMiddle * yawRot) * Vector3.forward;
-                float drawScale = 0.1f;
-                Gizmos.DrawLine(basePos, basePos + dirSample * desiredSpeed * drawScale);
-                Gizmos.DrawSphere(basePos + dirSample * desiredSpeed * drawScale, 0.05f);
-            }
-            // Highlight extremes in red
-            Gizmos.color = Color.red;
-            Vector3 dirLeft = (baseWithMiddle * Quaternion.Euler(0f, -halfYaw, 0f)) * Vector3.forward;
-            Vector3 dirRight = (baseWithMiddle * Quaternion.Euler(0f, halfYaw, 0f)) * Vector3.forward;
-            float drawScale2 = 0.1f;
-            Gizmos.DrawLine(basePos, basePos + dirLeft * desiredSpeed * drawScale2);
-            Gizmos.DrawSphere(basePos + dirLeft * desiredSpeed * drawScale2, 0.07f);
-            Gizmos.DrawLine(basePos, basePos + dirRight * desiredSpeed * drawScale2);
-            Gizmos.DrawSphere(basePos + dirRight * desiredSpeed * drawScale2, 0.07f);
+            SetLayerRecursively(child.gameObject, newLayer);
         }
     }
-#endif
 }

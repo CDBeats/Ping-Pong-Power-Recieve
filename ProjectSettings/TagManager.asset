@@ -6,6 +6,9 @@ TagManager:
   tags:
   - Ball
   - Ground
+  - TableFront
+  - TableBack
+  - Paddle
   layers:
   - Default
   - TransparentFX
@@ -13,7 +16,7 @@ TagManager:
   - BackgroundOnly
   - Water
   - UI
-  - 
+  - Ball
   - 
   - 
   - 

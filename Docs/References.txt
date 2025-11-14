@@ -1,0 +1,53 @@
+Arduino. (n.d.). Arduino_BMI270_BMM150 library. GitHub.
+https://github.com/arduino-libraries/Arduino_BMI270_BMM150
+Arduino. (n.d.). ArduinoBLE library. GitHub. https://github.com/arduino-libraries/ArduinoBLE
+Arduino. (n.d.). Arduino Nano 33 BLE Sense Rev2. Arduino Documentation.
+https://docs.arduino.cc/hardware/nano-33-ble-sense-rev2
+Arduino. (n.d.). ArduinoBLE library reference. Arduino.
+https://www.arduino.cc/en/Reference/ArduinoBLE
+Bluetooth SIG, Inc. (2024). Bluetooth core specification version 6.0. Bluetooth.
+https://www.bluetooth.com/specifications/bluetooth-core-specification/
+Madgwick, S. O. H. (2010). An efficient orientation filter for inertial and inertial/magnetic
+sensor arrays [Technical report]. University of Bristol. https://x-io.co.uk/res/doc/madgw ick_internal_report.pdf (they switched the name for marketing… https://github.com/xio Technologies/Fusion)
+Microsoft. (n.d.). BitConverter class. Microsoft Learn.
+https://learn.microsoft.com/en-us/dotnet/api/system.bitconverter
+Adabru. (2021). BleWinrtDLL: A Unity Bluetooth Low Energy plugin for Windows.
+GitHub. https://github.com/adabru/BleWinrtDll
+Unity Technologies. (2024). Collision. Unity.
+https://docs.unity3d.com/ScriptReference/Collision.html
+Unity Technologies. (2024). Debug.Log. Unity.
+https://docs.unity3d.com/ScriptReference/Debug.Log.html
+Unity Technologies. (2024). Debug.LogWarning. Unity.
+https://docs.unity3d.com/ScriptReference/Debug.LogWarning.html
+Unity Technologies. (2024). ForceMode.Impulse. Unity.
+https://docs.unity3d.com/ScriptReference/ForceMode.Impulse.html
+Unity Technologies. (2024). GameObject.SetActive. Unity.
+https://docs.unity3d.com/ScriptReference/GameObject.SetActive.html
+Unity Technologies. (2024). Gizmos. Unity.
+https://docs.unity3d.com/ScriptReference/Gizmos.html
+Unity Technologies. (2024). Handles.Label. Unity.
+https://docs.unity3d.com/ScriptReference/Handles.Label.html
+Unity Technologies. (2024). Mathf.Clamp01. Unity.
+https://docs.unity3d.com/ScriptReference/Mathf.Clamp01.html
+Unity Technologies. (2024). MonoBehaviour. Unity.
+https://docs.unity3d.com/ScriptReference/MonoBehaviour.html
+Unity Technologies. (2024). MonoBehaviour.OnCollisionEnter. Unity.
+https://docs.unity3d.com/ScriptReference/MonoBehaviour.OnCollisionEnter.html
+Unity Technologies. (2024). Object.FindFirstObjectByType. Unity.
+https://docs.unity3d.com/ScriptReference/Object.FindFirstObjectByType.html
+Unity Technologies. (2024). Quaternion. Unity.
+https://docs.unity3d.com/ScriptReference/Quaternion.html
+Unity Technologies. (2024). Rigidbody. Unity.
+https://docs.unity3d.com/ScriptReference/Rigidbody.html
+Unity Technologies. (2024). SerializeField, HideInInspector, Range (Attributes). Unity.
+https://docs.unity3d.com/Manual/Attributes.html
+Unity Technologies. (2024). SphereCollider. Unity.
+https://docs.unity3d.com/ScriptReference/SphereCollider.html
+Unity Technologies. (2024). Time.timeScale. Unity.
+https://docs.unity3d.com/ScriptReference/Time-timeScale.html
+Unity Technologies. (2024). Transform. Unity.
+https://docs.unity3d.com/ScriptReference/Transform.html
+Unity Technologies. (2024). Vector2. Unity.
+https://docs.unity3d.com/ScriptReference/Vector2.html
+Unity Technologies. (2024). Vector3. Unity.
+https://docs.unity3d.com/ScriptReference/Vector3.html
